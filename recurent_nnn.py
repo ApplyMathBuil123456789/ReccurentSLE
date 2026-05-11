@@ -9,15 +9,15 @@
 Rekurrent Signal Denoising Network (SLE-RNN)
 =============================================
 
-Signalni iterativ qayta tiklash uchun rekurrent neyron tarmoq.
-Har bir iteratsiyada shovqinli signaldan toza signal ajratiladi va
-keyingi iteratsiyaga faqat qayta tiklangan signal uzatiladi.
+Recurrent neural network for iterative signal reconstruction.
+At each iteration, a clean signal is separated from a noisy signal and
+only the reconstructed signal is passed to the next iteration.
 
-Matematik model:
-    Y^(0) = Y_noisy (kirish)
-    S^(t) = Filter(Y^(t-1); α, κ, r)  (spectral reconstruction)
-    Y^(t) = S^(t)                     (shovqinsiz, faqat qayta tiklangan signal)
-    natija: S^(T) (T iteratsiyadan so'ng)
+Mathematical model:
+Y^(0) = Y_noisy (input)
+S^(t) = Filter(Y^(t-1); α, κ, r) (spectral reconstruction)
+Y^(t) = S^(t) (noiseless, only reconstructed signal)
+result: S^(T) (after T iterations)
 """
 
 import torch
@@ -32,21 +32,21 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 # =============================================================================
-# 1. KONFIGURATSIYA VA YORDAMCHI CLASSLAR
+# 1. CONFIGURATION AND HELPER CLASSES
 # =============================================================================
 
 @dataclass
 class ModelConfig:
-    """Model konfiguratsiyasi"""
-    M: int = 1000                     # Signal uzunligi
-    T: int = 1                        # Vaqt oralig'i [0, T]
-    epsilon: float = 0.01             # Shovqin darajasi
-    num_iterations: int = 3           # Rekurrent iteratsiyalar soni
+    """Model configuration"""
+    M: int = 1000                     # Signal length
+    T: int = 1                        # Time interval [0, T]
+    epsilon: float = 0.01             # Noise level
+    num_iterations: int = 3           # Number of recurrent iterations
 
-    # Gating tarmoq arxitekturasi
+    # Gating network architecture
     gating_hidden: int = 64
 
-    # O'qitish parametrlari
+    # Training parameters
     batch_size: int = 64
     epochs: int = 10
     lr: float = 1e-2
@@ -54,7 +54,7 @@ class ModelConfig:
 
 @dataclass
 class ParameterGrid:
-    """Adaptiv parametrlar to'rini saqlash"""
+    """Save adaptive parameter grid"""
     alphas: List[float]
     kappas: List[float]
     rs: List[float]
@@ -63,21 +63,20 @@ class ParameterGrid:
         return len(self.alphas) * len(self.kappas) * len(self.rs)
 
     def get_all_combinations(self) -> List[Tuple[float, float, float]]:
-        """Barcha (alpha, kappa, r) kombinatsiyalarini qaytaradi"""
+        """Returns all combinations of (alpha, kappa, r)"""
         import itertools
         return list(itertools.product(self.alphas, self.kappas, self.rs))
 
 
 # =============================================================================
-# 2. SIGNAL GENERATORLARI
+# 2. SIGNAL GENERATOR
 # =============================================================================
 
 class SignalGenerators:
-    """Turli xil signal funksiyalari"""
+    """Various alarm functions"""
 
     @staticmethod
     def sinusoidal(t: np.ndarray) -> np.ndarray:
-        """Sinusoidal signal: A*sin(2πft + φ)"""
         A = random.uniform(0.5, 1.0)
         f = random.uniform(0.1, 1.0)
         phi = random.uniform(0, 2 * np.pi)
@@ -85,7 +84,6 @@ class SignalGenerators:
 
     @staticmethod
     def square_wave(t: np.ndarray) -> np.ndarray:
-        """To'rtburchak signal: A*sign(sin(2πt + φ))"""
         A = random.uniform(0.1, 2.0)
         phi = random.uniform(0, 2 * np.pi)
         s = A * np.sign(np.sin(2 * np.pi * t + phi))
@@ -94,19 +92,16 @@ class SignalGenerators:
 
     @staticmethod
     def sawtooth(t: np.ndarray) -> np.ndarray:
-        """Arra signal: A*(t - floor(t + 0.5))"""
         A = random.uniform(0.1, 2.0)
         return A * (t - np.floor(t + 0.5))
 
     @staticmethod
     def triangular(t: np.ndarray) -> np.ndarray:
-        """Uchburchak signal: A*|2(t - floor(t + 0.5))|"""
         A = random.uniform(0.3, 1.0)
         return A * np.abs(2 * (t - np.floor(t + 0.5)))
 
     @staticmethod
     def damped_oscillation(t: np.ndarray) -> np.ndarray:
-        """Sozuvchan tebranish: A*exp(-αt)*sin(2πft)"""
         A = random.uniform(0.5, 2.0)
         alpha = random.uniform(1.0, 5.0)
         f = random.uniform(1.0, 5.0)
@@ -114,7 +109,6 @@ class SignalGenerators:
 
     @staticmethod
     def gaussian_pulse(t: np.ndarray) -> np.ndarray:
-        """Gaus impulsi: A*exp(-(t-μ)²/(2σ²))"""
         A = random.uniform(0.5, 2.0)
         mu = random.uniform(0.3, 0.7)
         sigma = random.uniform(0.05, 0.2)
@@ -122,7 +116,6 @@ class SignalGenerators:
 
     @staticmethod
     def chirp(t: np.ndarray) -> np.ndarray:
-        """Chirp signal: A*sin(2π(f₀t + (k/2)t²))"""
         A = random.uniform(0.5, 2.0)
         f0 = random.uniform(1.0, 5.0)
         k = random.uniform(1.0, 4.0)
@@ -130,7 +123,6 @@ class SignalGenerators:
 
     @staticmethod
     def single_pulse(t: np.ndarray) -> np.ndarray:
-        """Yagona impuls"""
         pulse_width = random.uniform(0.05, 0.2)
         t_start = random.uniform(0, 1 - pulse_width)
         signal = np.zeros_like(t)
@@ -139,7 +131,6 @@ class SignalGenerators:
 
     @classmethod
     def get_all_generators(cls) -> List[Callable]:
-        """Barcha generatorlarni qaytaradi"""
         return [
             cls.sinusoidal,
             cls.square_wave,
@@ -153,11 +144,11 @@ class SignalGenerators:
 
 
 # =============================================================================
-# 3. MA'LUMOTLAR GENERATSIYASI
+# 3. DATA GENERATION
 # =============================================================================
 
 class SignalDatasetGenerator:
-    """Shovqinli va toza signal juftlarini generatsiya qilish"""
+    """Generating noisy and clean signal pairs"""
 
     def __init__(self, config: ModelConfig):
         self.config = config
@@ -169,14 +160,14 @@ class SignalDatasetGenerator:
         noise_eps: Optional[float] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Turli signal turlari uchun shovqinli ma'lumotlar generatsiya qiladi
+        Generates noisy data for different signal types
 
-        Args:
-            n_samples: Har bir signal turi uchun namunalar soni
-            noise_eps: Shovqin kuchi (None bo'lsa config.epsilon ishlatiladi)
+Args:
+n_samples: Number of samples for each signal type
+noise_eps: Noise power (If None, config.epsilon is used)
 
-        Returns:
-            (noisy_signals, clean_signals) - shape: (n_samples * 8 * 5, M)
+Returns:
+(noisy_signals, clean_signals) - shape: (n_samples * 8 * 5, M)
         """
         if noise_eps is None:
             noise_eps = self.config.epsilon
@@ -214,15 +205,15 @@ class SignalDatasetGenerator:
         noise_eps: Optional[float] = None
     ) -> Tuple[np.ndarray, np.ndarray, str]:
         """
-        Bitta signal turini generatsiya qiladi
+        Generates one type of signal
 
-        Args:
-            n_samples: Namunalar soni
-            signal_type: 0-7 (sinusoidal, square, sawtooth, ...)
-            noise_eps: Shovqin kuchi
+Args:
+n_samples: Number of samples
+signal_type: 0-7 (sinusoidal, square, sawtooth, ...)
+noise_eps: Noise power
 
-        Returns:
-            (noisy, clean, signal_name)
+Returns:
+(noisy, clean, signal_name)
         """
         if noise_eps is None:
             noise_eps = self.config.epsilon
@@ -279,9 +270,9 @@ class SignalDataset(Dataset):
 
 class SpectralReconstructor(nn.Module):
     """
-    Spectral bazis funktsiyalari yordamida signal rekonstruksiyasi
+    Signal reconstruction using spectral basis functions
 
-    Trigonometrik bazis:
+Trigonometric basis:
         φ_{2k}(t) = √2 * sin(2πkt)
         φ_{2k+1}(t) = √2 * cos(2πkt)
     """
@@ -297,22 +288,21 @@ class SpectralReconstructor(nn.Module):
 
     def _get_phi_matrix(self, j_vals: torch.Tensor, t_vals: torch.Tensor) -> torch.Tensor:
         """
-        Trigonometrik bazis matritsasini yaratadi
+        Creates a trigonometric basis matrix
 
-        Args:
-            j_vals: Bazis indekslari (1, 2, ..., l)
-            t_vals: Vaqt nuqtalari [0, T]
+Args:
+j_vals: Basis indices (1, 2, ..., l)
+t_vals: Time points [0, T]
 
-        Returns:
-            phi: (l, M) shape dagi bazis matritsa
+Returns:
+phi: Basis matrix in shape (l, M)
         """
-        # j/2 ni pastki butun songa yaxlitlash (sin/cos uchun)
+      
         j_half = torch.floor(j_vals / 2)
 
-        # Burchaklar: 2π * (j//2) * t
+      
         angles = 2 * math.pi * torch.tensordot(j_half, t_vals, dims=0)
-
-        # Juft indekslar -> sin, toq indekslar -> cos
+ 
         is_even = ((j_vals % 2) == 0).float().unsqueeze(1)
 
         sqrt2 = math.sqrt(2.0)
@@ -321,12 +311,10 @@ class SpectralReconstructor(nn.Module):
 
         phi = is_even * sin_part + (1 - is_even) * cos_part
 
-        # Birinchi ustunni 1 qilish (DC komponent)
         ones_col = torch.ones(phi.size(0), 1, device=phi.device)
         # ones_col = torch.ones(phi.size(0), 1, device=phi.device) / math.sqrt(2.0)
         phi = torch.cat([ones_col, phi], dim=1)
 
-        # Oxirgi ustunni olib tashlash (to'g'ri o'lcham uchun)
         return phi[:, :-1]
 
     def compute_optimal_l(
@@ -338,19 +326,19 @@ class SpectralReconstructor(nn.Module):
         max_n: int
     ) -> torch.Tensor:
         """
-        Optimal bazis uzunligini hisoblaydi
+       Calculates the optimal base length 
 
-        Shart: exp(k*l^α) * Σexp(k*m^α) - Σexp(2k*m^α) ≤ r/ε²
+Condition: exp(k*l^a) * Sexp(k*m^a) - Sexp(2k*m^a) ≤ r/e² 
 
-        Args:
-            kappa: κ parametri
-            alpha: α parametri
-            r: r parametri
-            epsilon: Shovqin darajasi
-            max_n: Maksimal bazis soni
+Args: 
+kappa: parameter k 
+alpha: parameter a 
+r: The r parameter 
+epsilon: Noise level 
+max_n: Maximum number of bases 
 
-        Returns:
-            Optimal l (int)
+Returns: 
+Optimal l(int)
         """
         device = kappa.device
 
@@ -360,11 +348,9 @@ class SpectralReconstructor(nn.Module):
         # exp(k * l^α)
         exp_kl_alpha = torch.exp(kappa * (l_range ** alpha))
 
-        # Kumulyativ yig'indilar
         sum1 = torch.cumsum(exp_kl_alpha, dim=0)           # Σ exp(k*m^α)
         sum2 = torch.cumsum(torch.exp(2 * kappa * (l_range ** alpha)), dim=0)
 
-        # Shart tekshirish
         condition = exp_kl_alpha * sum1 - sum2
         threshold = r / (epsilon ** 2)
 
@@ -386,62 +372,52 @@ class SpectralReconstructor(nn.Module):
         epsilon: float
     ) -> torch.Tensor:
         """
-        Bitta parametrlar to'plami uchun signal rekonstruksiyasi
+        Signal reconstruction for a single set of parameters
 
-        Args:
-            Y: (batch, M) - kirish signali
-            alpha, kappa, r: Skalyar parametrlar
-            epsilon: Shovqin darajasi
+Args:
+Y: (batch, M) - input signal
+alpha, kappa, r: Scalar parameters
+epsilon: Noise level
 
-        Returns:
-            S_hat: (batch, M) - qayta tiklangan signal
+Returns:
+S_hat: (batch, M) - reconstructed signal
         """
         batch_size, M = Y.shape
         device = Y.device
 
-        # Optimal bazis uzunligi
         l = int(self.compute_optimal_l(kappa, alpha, r, epsilon, M).item())
         l = min(l, M - 1)  # Cheklash
 
-        # Vaqt gridi
         t_vals = torch.linspace(0, self.T, M, device=device)
 
-        # Bazis matritsalari
         j_vals = torch.arange(1, l + 1, dtype=torch.float32, device=device)
         phi_t = self._get_phi_matrix(j_vals, t_vals)  # (l, M)
 
-        # Fourier koeffitsientlari (to'g'ridan-to'g'li Y dan)
-        # omega = (1/M) * Y * φ^T
         omega = torch.matmul(Y, phi_t.T) / M  # (batch, l)
 
-        # Tikhonov filtri: λ_j = 1 - exp(-κ(l^α - j^α))
         l_float = float(l)
         j_float = j_vals  # (l,)
 
         lambda_j = 1.0 - torch.exp(-kappa * ((l_float ** alpha) - (j_float ** alpha)))
 
-        # Vaznli koeffitsientlar
         weighted = omega * lambda_j.unsqueeze(0)  # (batch, l)
 
-        # Signal rekonstruksiyasi
         S_hat = torch.matmul(weighted, phi_t)  # (batch, M)
 
         return S_hat
 
 
 # =============================================================================
-# 5. REKURRENT NEYRON TARMOQ (ASOSIY MODEL)
+# 5. RECURRENT NEURAL NETWORK (BASIC MODEL)
 # =============================================================================
 iterationsss=[]
 class RecurrentSLE(nn.Module):
     """
-    Rekurrent Signal Learning Engine (SLE-RNN)
+   Recurrent Signal Learning Engine (SLE-RNN)
 
-    Har bir iteratsiyada:
-        1. Joriy Y dan S_hat ni spectral usul bilan hisoblash
-        2. Keyingi iteratsiyaga Y_new = S_hat uzatish (shovqin qo'shilmaydi!)
-
-    Bu "denoising diffusion" usuliga o'xshaydi, lekin deterministik.
+At each iteration:
+1. Compute S_hat from current Y using spectral method
+2. Pass Y_new = S_hat to next iteration (no noise added!)
     """
 
     def __init__(
@@ -453,12 +429,12 @@ class RecurrentSLE(nn.Module):
         gating_hidden: int = 64
     ):
         """
-        Args:
-            M: Signal uzunligi
-            param_grid: (alpha, kappa, r) parametrlar to'ri
-            epsilon: Shovqin darajasi
-            T: Vaqt oralig'i
-            gating_hidden: Gating tarmoq yashirin qatlam o'lchami
+       Args:
+M: Signal length
+param_grid: (alpha, kappa, r) ​​parameter grid
+epsilon: Noise level
+T: Time interval
+gating_hidden: Gating network hidden layer size
         """
         super().__init__()
 
@@ -467,16 +443,13 @@ class RecurrentSLE(nn.Module):
         self.T = T
         self.param_grid = param_grid
 
-        # Barcha parametrlar kombinatsiyalari
         self.candidate_params = param_grid.get_all_combinations()
         self.L = len(self.candidate_params)
 
         print(f"Model yaratildi: {self.L} ta parametrlar kombinatsiyasi")
 
-        # Har bir parametrlar to'plami uchun reconstructor
         self.reconstructor = SpectralReconstructor(M, T)
 
-        # Gating tarmoq: qaysi ekspert (parametr) eng yaxshi ekanini aniqlaydi
         self.gating = nn.Sequential(
             nn.Linear(M, gating_hidden),
             nn.ReLU(),
@@ -484,11 +457,10 @@ class RecurrentSLE(nn.Module):
             nn.Linear(gating_hidden, self.L)
         )
 
-        # Optimal l qiymatlarini oldindan hisoblash (tezlik uchun)
         self._precompute_l_values()
 
     def _precompute_l_values(self):
-        """Barcha parametrlar uchun optimal l ni oldindan hisoblash"""
+        """Pre-calculate the optimal l for all parameters"""
         device = next(self.parameters()).device
 
         self.l_values = []
@@ -511,14 +483,14 @@ class RecurrentSLE(nn.Module):
         idx: int
     ) -> torch.Tensor:
         """
-        Bitta ekspert (parametr kombinatsiyasi) uchun rekonstruksiya
+        Reconstruction for one expert (parameter combination)
 
-        Args:
-            Y: (batch, M) - kirish signali
-            idx: Ekspert indeksi
+Args:
+Y: (batch, M) - input signal
+idx: Expert index
 
-        Returns:
-            S_hat: (batch, M) - qayta tiklangan signal
+Returns:
+S_hat: (batch, M) - reconstructed signal
         """
         alpha, kappa, r = self.candidate_params[idx]
 
@@ -534,27 +506,27 @@ class RecurrentSLE(nn.Module):
         num_iterations: int
     ) -> torch.Tensor:
         """
-        REKURRENT ASOSIY QISM — Dinamik to'xtatish sharti bilan
+        RECURRENT MAIN PART — With dynamic stopping condition
 
-        Iterativ signal yaxshilash:
-            Y^(0) = Y_noisy
-            for t in 1..T:
-                S^(t) = Σ w_i * Expert_i(Y^(t-1))
-                Y^(t) = S^(t)  <-- FARQ: shovqin qo'shilmaydi!
+Iterative signal improvement:
+Y^(0) = Y_noisy
+for t in 1..T:
+S^(t) = Σ w_i * Expert_i(Y^(t-1))
+Y^(t) = S^(t) <-- DIFFERENCE: no noise added!
 
-        To'xtatish sharti (kamida 2 ta iteratsiyadan keyin tekshiriladi):
-            MSE(S_hat_new, S_hat_old) <= (kappa^(1/alpha)) * n^(1/alpha) / n
-        bu yerda kappa va alpha gating tomonidan tanlangan eng yaxshi ekspert
-        parametrlari, n = M (signal uzunligi).
+Stopping condition (checked after at least 2 iterations):
+MSE(S_hat_new, S_hat_old) <= (kappa^(1/alpha)) * n^(1/alpha) / n
+where kappa and alpha are the best expert
+parameters selected by gating, n = M (signal length).
 
-        Maksimal iteratsiyalar soni: 10
+Maximum number of iterations: 10
 
-        Args:
-            Y_initial: (batch, M) - boshlang'ich shovqinli signal
-            num_iterations: (e'tiborga olinmaydi, dinamik to'xtatish ishlatiladi)
+Args:
+Y_initial: (batch, M) - initial noisy signal
+num_iterations: (ignored, dynamic stopping is used)
 
-        Returns:
-            S_final: (batch, M) - yakuniy qayta tiklangan signal
+Returns:
+S_final: (batch, M) - final reconstructed signal
         """
         device = Y_initial.device
         n = float(self.M)  # Signal uzunligi (n)
@@ -562,50 +534,42 @@ class RecurrentSLE(nn.Module):
         MAX_ITERATIONS = 10
         MIN_ITERATIONS = 2
 
-        # Boshlang'ich qiymat
 
         Y_current = Y_initial
         S_hat_old = None  # Oldingi iteratsiya natijasi
         S_hat = None
 
         for iteration in range(MAX_ITERATIONS):
-            # === 1. GATING: Har bir ekspertning vazni ===
+            # === 1. GATING: The weight of each expert ===
             logits = self.gating(Y_current)  # (batch, L)
             weights = F.softmax(logits, dim=1)  # (batch, L)
 
-            # === 2. EXPERTS: Har bir parametrlar to'plami uchun rekonstruksiya ===
+            # === 2. EXPERTS:Reconstruction for each set of parameters ===
             reconstructions = []
 
             for idx in range(self.L):
                 S_hat_i = self._compute_single_expert(Y_current, idx)
                 reconstructions.append(S_hat_i)
 
-            # (batch, L, M) ga yig'ish
             reconstructions = torch.stack(reconstructions, dim=1)
 
-            # === 3. AGGREGATION: Vaznli o'rtacha ===
-            # (batch, L, 1) * (batch, L, M) -> (batch, M)
+            # === 3. AGGREGATION: Weighted Average ===
             weights_expanded = weights.unsqueeze(-1)  # (batch, L, 1)
             S_hat = (reconstructions * weights_expanded).sum(dim=1)
 
-            # === 4. DINAMIK TO'XTATISH SHARTI ===
-            # Kamida 2 ta iteratsiyadan so'ng tekshirish boshlaydi
+            # === 4. DYNAMIC STOPPING CONDITION ===
             if iteration >= MIN_ITERATIONS - 1 and S_hat_old is not None:
-                # Eng yaxshi ekspert indeksini topish (batch bo'yicha o'rtacha vazn)
                 if iteration<3:
                     best_expert_idx = weights.mean(dim=0).argmax().item()
                     alpha_val, kappa_val, _ = self.candidate_params[best_expert_idx]
 
-                      # alpha = 0 yoki juda kichik bo'lsa, default qiymat ishlatiladi
                     alpha_safe = max(alpha_val, 1e-6)
 
-                # Chegara: (kappa^(1/alpha)) * n^(1/alpha) / n
                 threshold = (kappa_val ** (1.0 / alpha_safe)) * (torch.log(torch.tensor(n)) ** (1.0 / alpha_safe)) / n
 
-                # Batch bo'yicha o'rtacha MSE(S_hat_new, S_hat_old)
                 mse_diff = F.mse_loss(S_hat, S_hat_old).item()
 
-                # Debug: iteratsiya ma'lumotlarini chop etish
+                # Debug:print iteration data
                 # print(f"Iter {iteration+1}: MSE_diff={mse_diff:.6f}, threshold={threshold:.6f}")
 
                 if mse_diff <= threshold:
@@ -613,7 +577,7 @@ class RecurrentSLE(nn.Module):
                     iterationsss.append(iteration)
                     break
 
-            # === 5. REKURRENT YANGILASH ===
+            # === 5. RECURRENT UPDATE ===
             S_hat_old = S_hat.detach().clone()
             scale = Y_current.norm(dim=-1, keepdim=True) / (S_hat.norm(dim=-1, keepdim=True) + 1e-8)
             Y_current = S_hat * scale
@@ -630,25 +594,25 @@ class RecurrentSLE(nn.Module):
         """
         Forward pass
 
-        Args:
-            Y: (batch, M) - shovqinli signal(lar)
-            num_iterations: Maksimal iteratsiyalar (None bo'lsa 10 ta).
-                            Dinamik to'xtatish sharti:
-                            MSE(S_hat_new, S_hat_old) <= (κ^(1/α)) * n^(1/α) / n
-                            Kamida 2 ta iteratsiya bajariladi.
-            return_all: Agar True bo'lsa, (S_hat, weights) qaytaradi
+        Args: 
+Y: (batch, M) - noisy signal(s) 
+num_iterations: Maximum iterations (10 if None). 
+Dynamic stop condition: 
+MSE(S_hat_new, S_hat_old) <= (k^(1/a)) * n^(1/a) / n 
+At least 2 iterations are performed. 
+return_all: Returns (S_hat, weights) if True 
 
-        Returns:
-            S_hat: (batch, M) - qayta tiklangan toza signal
+Returns: 
+S_hat: (batch, M) - restored clean signal
         """
         if num_iterations is None:
             num_iterations = 10  # Maksimal chegara (dinamik to'xtatish ishlatiladi)
 
-        # Rekurrent iterativ yaxshilash (dinamik to'xtatish sharti bilan)
+        # Recurrent iterative improvement (with dynamic stopping condition)
         S_hat = self._iterative_refinement(Y, num_iterations)
 
         if return_all:
-            # So'nggi iteratsiya uchun vaznlarni ham qaytarish
+            # Also return the weights for the last iteration
             with torch.no_grad():
                 logits = self.gating(S_hat)
                 weights = F.softmax(logits, dim=1)
@@ -658,18 +622,11 @@ class RecurrentSLE(nn.Module):
 
 
 # =============================================================================
-# 6. PARAMETRLAR TO'RI GENERATORI
+# 6. PARAMETER SPACE GENERATOR
 # =============================================================================
 
 def create_adaptive_param_grid(epsilon: float) -> ParameterGrid:
-    """
-    Epsilon (shovqin darajasi) asosida adaptiv parametrlar to'ri yaratadi
-
-    Formulalar:
-        m_1 = 2 * (log(log(1 + 1/ε⁴)))²
-        m_2 = 2 * (log(log(1 + 1/ε²)))⁴
-        m_3 = 2 * (log(log(1 + 1/ε²)))²
-    """
+ 
     eps = epsilon
 
     # Grid o'lchamlari
@@ -679,15 +636,15 @@ def create_adaptive_param_grid(epsilon: float) -> ParameterGrid:
 
     print(f"Parametr grid o'lchamlari: α={m1}, κ={m2}, r={m3}")
 
-    # Alpha qiymatlari: [1/m1, 2/m1, ..., 1] / log(log(1/ε⁴))²
+    # Alpha: [1/m1, 2/m1, ..., 1] / log(log(1/ε⁴))²
     denom_alpha = math.log(math.log(1 + (1 / eps**4)))**2
     alphas = [i / denom_alpha for i in range(1, m1 + 1)]
 
-    # Kappa qiymatlari
+    # Kappa 
     denom_kappa = math.log(math.log(1 + (1 / eps**2)))**2
     kappas = [i / denom_kappa for i in range(1, m2 + 1)]
 
-    # R qiymatlari: 1 + [1/m3, 2/m3, ...]
+    # r
     denom_r = math.log(math.log(1 + (1 / eps**2)))
     rs = [1 + i / denom_r for i in range(1, m3 + 1)]
 
@@ -695,11 +652,11 @@ def create_adaptive_param_grid(epsilon: float) -> ParameterGrid:
 
 
 # =============================================================================
-# 7. O'QITISH VA BAHOLASH
+# 7. TRAINING AND ASSESSMENT
 # =============================================================================
 
 class Trainer:
-    """Model o'qitish va baholash class'i"""
+    """Model teaching and assessment class"""
 
     def __init__(
         self,
@@ -720,14 +677,14 @@ class Trainer:
         epochs: Optional[int] = None
     ) -> List[float]:
         """
-        Modelni o'qitish
+           Train the model
 
-        Args:
-            train_loader: DataLoader
-            epochs: Epochlar soni (None bo'lsa config.epochs)
+Args:
+train_loader: DataLoader
+epochs: Number of epochs (config.epochs if None)
 
-        Returns:
-            losses: Har bir epoch uchun o'rtacha yo'qotish
+Returns:
+losses: Average loss per epoch
         """
         if epochs is None:
             epochs = self.config.epochs
@@ -745,13 +702,12 @@ class Trainer:
 
                 self.optimizer.zero_grad()
 
-                # Forward: rekurrent iterativ rekonstruksiya
+                # Forward: recurrent iterative reconstruction
                 S_hat = self.model(
                     batch_noisy,
                     num_iterations=self.config.num_iterations
                 )
 
-                # Yo'qotish: qayta tiklangan vs haqiqiy signal
                 loss = self.criterion(S_hat, batch_clean)
 
                 loss.backward()
@@ -772,7 +728,7 @@ class Trainer:
         test_loader: DataLoader
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
-        Modelni baholash
+        Model evaluation
 
         Returns:
             (mse, predictions, targets)
@@ -810,7 +766,7 @@ class Trainer:
         num_iterations: Optional[int] = None
     ) -> np.ndarray:
         """
-        Bitta signal uchun bashorat
+        Prediction for one signal
         """
         if num_iterations is None:
             num_iterations = self.config.num_iterations
@@ -826,15 +782,14 @@ class Trainer:
 
 
 # =============================================================================
-# 8. VIZUALIZATSIYA VA Tahlil
+# 8. VISUALIZATION AND ANALYSIS
 # =============================================================================
 
 class Visualizer:
-    """Natijalarni vizualizatsiya qilish"""
+    """Visualizing results"""
 
     @staticmethod
     def plot_training_history(history: List[float], save_path: Optional[str] = None):
-        """O'qitish tarixi grafigi"""
         plt.figure(figsize=(10, 6))
         plt.plot(history, 'b-', linewidth=2)
         plt.xlabel('Epoch')
@@ -855,22 +810,18 @@ class Visualizer:
         predicted: np.ndarray,
         save_path: Optional[str] = None
     ):
-        """Signal solishtiruvi"""
         fig, axes = plt.subplots(3, 1, figsize=(12, 10))
 
-        # Toza signal
         axes[0].plot(t, clean, 'g-', linewidth=2, label='Clean Signal')
         axes[0].set_title('Original Clean Signal')
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
 
-        # Shovqinli signal
         axes[1].plot(t, noisy, 'r-', alpha=0.7, label='Noisy Signal')
         axes[1].set_title(f'Noisy Signal (SNR: {Visualizer._compute_snr(clean, noisy):.2f} dB)')
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
 
-        # Qayta tiklangan signal
         axes[2].plot(t, clean, 'g--', linewidth=2, alpha=0.7, label='Clean (target)')
         axes[2].plot(t, predicted, 'b-', linewidth=2, label='Predicted')
         axes[2].set_title(f'Reconstructed Signal (MSE: {np.mean((clean-predicted)**2):.6f})')
@@ -890,18 +841,15 @@ class Visualizer:
         true_signal: np.ndarray,
         n_plot: int = 10
     ):
-        """Bir nechta bashoratlarni ko'rsatish"""
+        """Show multiple predictions"""
         plt.figure(figsize=(12, 6))
 
-        # Birinchi n_plot ta bashorat
         for i in range(min(n_plot, len(predictions))):
             plt.plot(t, predictions[i], 'b-', alpha=0.3, linewidth=1)
 
-        # O'rtacha bashorat
         mean_pred = predictions.mean(axis=0)
         plt.plot(t, mean_pred, 'k-', linewidth=3, label='Mean Prediction')
 
-        # Haqiqiy signal
         plt.plot(t, true_signal, 'r--', linewidth=2, label='True Signal')
 
         plt.xlabel('Time')
@@ -913,20 +861,20 @@ class Visualizer:
 
     @staticmethod
     def _compute_snr(clean: np.ndarray, noisy: np.ndarray) -> float:
-        """Signal-to-Noise Ratio hisoblash (dB)"""
+        """Signal-to-Noise Ratio (dB)"""
         signal_power = np.mean(clean**2)
         noise_power = np.mean((noisy - clean)**2)
         return 10 * np.log10(signal_power / noise_power)
 
 
 # =============================================================================
-# 9. ASOSIY ISHLASH FUNKSIYASI
+# 9. MAIN OPERATIONAL FUNCTION
 # =============================================================================
 
 def main():
-    """Asosiy ish jarayoni"""
+    """MAIN OPERATIONAL FUNCTION"""
 
-    # --- 1. Konfiguratsiya ---
+    # --- 1. Configuration ---
     config = ModelConfig(
         M=1000,
         epsilon=0.1,
@@ -938,21 +886,21 @@ def main():
     noise=0.1
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Qurilma: {device}")
-    print(f"Konfiguratsiya: {config}")
+    print(f"Configuration: {config}")
 
-    # --- 2. Ma'lumotlarni generatsiya qilish ---
-    print("\n--- Ma'lumotlar generatsiyasi ---")
+    # --- 2. Data generation ---
+    print("\n--- Data generation ---")
     generator = SignalDatasetGenerator(config)
 
-    # O'qitish ma'lumotlari
+    # Training information
     Y_train, S_train = generator.generate_noisy_signals(n_samples=15, noise_eps=noise)
     print(f"O'qitish ma'lumotlari: {Y_train.shape}")
 
-    # Test ma'lumotlari (bitta turdagi signal)
+    # Test data (one type of signal)
     Y_test, S_test, signal_name = generator.generate_single_type(
         n_samples=20, signal_type=2, noise_eps=noise  # Sawtooth
     )
-    print(f"Test ma'lumotlari ({signal_name}): {Y_test.shape}")
+    print(f"Test data ({signal_name}): {Y_test.shape}")
 
     # DataLoader yaratish
     train_dataset = SignalDataset(Y_train, S_train)
@@ -962,8 +910,8 @@ def main():
         shuffle=True
     )
 
-    # --- 3. Model yaratish ---
-    print("\n--- Model yaratish ---")
+    # --- 3. Model creation ---
+    print("\n--- Model creation ---")
     param_grid = create_adaptive_param_grid(config.epsilon)
 
     model = RecurrentSLE(
@@ -974,18 +922,18 @@ def main():
         gating_hidden=config.gating_hidden
     ).to(device)
 
-    print(f"Model parametrlari soni: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Number of model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # --- 4. O'qitish ---
-    print("\n--- O'qitish jarayoni ---")
+    # --- 4. Train ---
+    print("\n--- Train ---")
     trainer = Trainer(model, config, device)
     history = trainer.train(train_loader)
 
-    # --- 5. Vizualizatsiya ---
-    print("\n--- Natijalar ---")
+    # --- 5. Visualization ---
+    print("\n--- Results ---")
     Visualizer.plot_training_history(history)
 
-    # Bitta signal uchun test
+    # Test for one signal
     t = np.linspace(0, config.T, config.M)
     pred = trainer.predict_single(Y_test[0])
 
@@ -996,22 +944,22 @@ def main():
         predicted=pred
     )
 
-    # Bir nechta bashoratlar
+   
     all_preds = [trainer.predict_single(Y_test[i]) for i in range(len(Y_test))]
     all_preds = np.array(all_preds)
 
     Visualizer.plot_multiple_predictions(t, all_preds, S_test[0])
 
-    # MSE hisoblash
+    # MSE  
     mse = np.mean((all_preds - S_test)**2)
     print(f"\nO'rtacha MSE: {mse:.6f}")
 
-    print("\n--- Tugadi ---")
+    print("\n--- Finish ---")
     return model, trainer, history
 
 
 # =============================================================================
-# 10. QO'SHIMCHA FUNKSIYALAR (ANALIZ UCHUN)
+# 10. ADDITIONAL FUNCTIONS (FOR ANALYSIS)
 # =============================================================================
 
 def analyze_optimal_parameters(
@@ -1021,14 +969,13 @@ def analyze_optimal_parameters(
     device: torch.device
 ):
     """
-    Har bir signal turi uchun optimal parametrlarni tahlil qilish
+    Analysis of optimal parameters for each signal type
     """
     print("\n=== Optimal Parametrlar Tahlili ===")
 
     param_stats = []
 
     for signal_type in range(8):
-        # Test ma'lumotlari
         Y_test, S_test, name = generator.generate_single_type(
             n_samples=100, signal_type=signal_type, noise_eps=0.01
         )
@@ -1039,7 +986,6 @@ def analyze_optimal_parameters(
         with torch.no_grad():
             _, weights = model(Y_tensor, return_all=True)
 
-        # Har bir namuna uchun eng katta vaznli parametrni topish
         optimal_indices = torch.argmax(weights, dim=1).cpu().numpy()
 
         alphas, kappas, rs = [], [], []
@@ -1070,10 +1016,9 @@ def analyze_optimal_parameters(
 # =============================================================================
 
 if __name__ == "__main__":
-    # Asosiy ish
     model, trainer, history = main()
 
-    # Qo'shimcha tahlil (ixtiyoriy)
+    # Additional analysis (optional)
     # config = ModelConfig()
     # generator = SignalDatasetGenerator(config)
     # device = next(model.parameters()).device
@@ -1081,17 +1026,17 @@ if __name__ == "__main__":
 
 # -*- coding: utf-8 -*-
 """
-SLE-RNN Model Tahlili
-======================
+SLE-RNN Model Analysis
+========================
 
-Bu skript trained RecurrentSLE modelini tahlil qiladi va:
-1. Har bir signal turi uchun optimal parametrlarni aniqlaydi
-2. MoE gating mexanizmini vizualizatsiya qiladi
-3. Ekspertlarning ishtirok darajasini ko'rsatadi
-4. "Olib tashlangan" (unused) ekspertlarni aniqlaydi
+This script analyzes the trained RecurrentSLE model and:
+1. Determines the optimal parameters for each signal type
+2. Visualizes the MoE gating mechanism
+3. Shows the level of expert participation
+4. Determines "removed" (unused) experts
 
-Foydalanish:
-    python analyze_model.py --model_path model.pth --output_dir analysis/
+Usage:
+python analyze_model.py --model_path model.pth --output_dir analysis/
 """
 
 import torch
@@ -1105,15 +1050,10 @@ from dataclasses import asdict
 import warnings
 warnings.filterwarnings('ignore')
 
-# Asosiy model kodini import qilish (yoki bu faylni model fayli bilan birga saqlash)
-# Agar alohida fayl bo'lsa, quyidagi importni moslashtirish kerak:
-# from your_model_file import RecurrentSLE, SignalDatasetGenerator, ModelConfig, create_adaptive_param_grid
-
+ 
 
 class ModelAnalyzer:
-    """
-    Trained SLE-RNN modelini tahlil qilish uchun class
-    """
+ 
 
     def __init__(self, model, config, device='cpu'):
         self.model = model
@@ -1135,23 +1075,7 @@ class ModelAnalyzer:
         signal_name: str,
         n_samples: Optional[int] = None
     ) -> Dict:
-        """
-        Bitta signal turi uchun batafsil tahlil
-
-        Returns:
-            {
-                'signal_name': str,
-                'optimal_params': {
-                    'alpha': (mean, std, best_value),
-                    'kappa': (mean, std, best_value),
-                    'r': (mean, std, best_value)
-                },
-                'expert_usage': array[L] - har bir ekspertning ishlatilish chastotasi,
-                'gating_entropy': float - vaznlarning entropiyasi (tasodifiyilik darajasi),
-                'dominant_experts': list - eng faol 5 ta ekspert,
-                'unused_experts': list - ishlatilmagan ekspertlar
-            }
-        """
+ 
         if n_samples is None:
             n_samples = len(Y_test)
         else:
@@ -1166,17 +1090,17 @@ class ModelAnalyzer:
             # weights shape: (n_samples, L)
             weights_np = weights.cpu().numpy()
 
-            # Har bir namuna uchun eng katta vaznli ekspert
+            # The expert with the largest weight for each sample
             dominant_per_sample = np.argmax(weights_np, axis=1)
 
-            # Har bir ekspertning ishlatilish chastotasi
+            # Frequency of use of each expert
             expert_usage = np.bincount(dominant_per_sample, minlength=self.L)
             expert_usage_freq = expert_usage / n_samples  # Normalizatsiya
 
-            # Vaznlarning o'rtacha qiymatlari
+            # Average values ​​of weights
             mean_weights = weights_np.mean(axis=0)
 
-            # Eng faol ekspertlar (top 5)
+            # Most active experts (top 5)
             top5_indices = np.argsort(mean_weights)[-5:][::-1]
             dominant_experts = [
                 {
@@ -1191,8 +1115,7 @@ class ModelAnalyzer:
                 for i, idx in enumerate(top5_indices)
             ]
 
-            # Ishlatilmagan ekspertlar (vazni < 0.01)
-            unused_threshold = 0.01 / self.L  # Tasodiy tasavvurdan past
+            unused_threshold = 0.01 / self.L  
             unused_mask = mean_weights < unused_threshold
             unused_experts = [
                 {
@@ -1206,15 +1129,13 @@ class ModelAnalyzer:
                 if unused_mask[i]
             ]
 
-            # Gating entropiyasi (qanchalik tasodifiy yoki qanchalik aniqlik bilan tanlangan)
-            # Yuqori entropiya = tasodifiy, Past entropiya = aniq tanlov
+ 
             eps = 1e-10
             entropy_per_sample = -np.sum(weights_np * np.log(weights_np + eps), axis=1)
             mean_entropy = float(entropy_per_sample.mean())
-            max_possible_entropy = np.log(self.L)  # Maksimal entropiya
-            normalized_entropy = mean_entropy / max_possible_entropy  # 0-1 orasida
+            max_possible_entropy = np.log(self.L)  # Maksimal 
+            normalized_entropy = mean_entropy / max_possible_entropy  # 0-1  
 
-            # Optimal parametrlar statistikasi (dominant ekspertlardan)
             optimal_alphas = [self.candidate_params[i][0] for i in dominant_per_sample]
             optimal_kappas = [self.candidate_params[i][1] for i in dominant_per_sample]
             optimal_rs = [self.candidate_params[i][2] for i in dominant_per_sample]
@@ -1255,9 +1176,9 @@ class ModelAnalyzer:
                 'gating_entropy': {
                     'raw': mean_entropy,
                     'normalized': normalized_entropy,
-                    'interpretation': 'Tasodifiy' if normalized_entropy > 0.8 else
-                                    'Qisman aniqlangan' if normalized_entropy > 0.5 else
-                                    'Aniq tanlangan'
+                    'interpretation': 'Random' if normalized_entropy > 0.8 else
+                                    'Partially identified' if normalized_entropy > 0.5 else
+                                    'Precisely selected'
                 },
                 'dominant_experts': dominant_experts,
                 'unused_experts': unused_experts,
@@ -1274,9 +1195,7 @@ class ModelAnalyzer:
         noise_eps: float = 0.1,
         n_samples_per_type: int = 100
     ) -> Dict[str, Dict]:
-        """
-        Barcha 8 ta signal turini tahlil qilish
-        """
+ 
         all_results = {}
 
         signal_names = [
@@ -1285,31 +1204,27 @@ class ModelAnalyzer:
         ]
 
         print("=" * 80)
-        print("SIGNAL TURLARI BO'YICHA TAHLIL")
+        print("ANALYSIS BY SIGNAL TYPES")
         print("=" * 80)
 
         for signal_type in range(8):
             print(f"\n--- {signal_names[signal_type]} ({signal_type}) ---")
 
-            # Ma'lumotlar generatsiyasi
             Y_test, S_test, name = generator.generate_single_type(
                 n_samples=n_samples_per_type,
                 signal_type=signal_type,
                 noise_eps=noise_eps
             )
 
-            # Tahlil
             result = self.analyze_signal_type(Y_test, S_test, name, n_samples_per_type)
             all_results[name] = result
 
-            # Konsolga chiqarish
             self._print_single_analysis(result)
 
         self.stats = all_results
         return all_results
 
     def _print_single_analysis(self, result: Dict):
-        """Bitta natijani chiroyli chop etish"""
         p = result['optimal_params']
 
         print(f"  Optimal α: {p['alpha']['mean']:.4f} ± {p['alpha']['std']:.4f} "
@@ -1318,24 +1233,24 @@ class ModelAnalyzer:
               f"[best: {p['kappa']['best']:.4f}]")
         print(f"  Optimal r: {p['r']['mean']:.4f} ± {p['r']['std']:.4f} "
               f"[best: {p['r']['best']:.4f}]")
-        print(f"  Gating entropiya: {result['gating_entropy']['normalized']:.3f} "
+        print(f"  Gating entropy: {result['gating_entropy']['normalized']:.3f} "
               f"({result['gating_entropy']['interpretation']})")
         print(f"  MSE: {result['performance']['mse']:.6f}")
 
-        print(f"\n  TOP 5 EKSPERTLAR:")
+        print(f"\n  TOP 5 EXPERTS:")
         for expert in result['dominant_experts']:
             print(f"    #{expert['rank']}. Expert {expert['expert_id']}: "
                   f"α={expert['alpha']:.4f}, κ={expert['kappa']:.4f}, r={expert['r']:.4f} "
                   f"(w={expert['mean_weight']:.4f}, f={expert['usage_frequency']:.2%})")
 
         if result['unused_experts']:
-            print(f"\n  OLIB TASHLANGAN EKSPERTLAR ({len(result['unused_experts'])} ta):")
+            print(f"\n  EXPERTS WHO HAVE BEEN REMOVED ({len(result['unused_experts'])} ta):")
             for exp in result['unused_experts'][:5]:  # Faqat birinchi 5 tasini
                 print(f"    Expert {exp['expert_id']}: w={exp['mean_weight']:.6f}")
             if len(result['unused_experts']) > 5:
-                print(f"    ... va yana {len(result['unused_experts']) - 5} ta")
+                print(f"     {len(result['unused_experts']) - 5} ta")
         else:
-            print(f"\n  Barcha ekspertlar ishlatilgan!")
+            print(f"\n  All experts are used!")
 
     def visualize_moe_analysis(self, save_prefix: str = "moe_analysis"):
         """
@@ -2072,163 +1987,7 @@ df_mse_combined = pd.DataFrame(results_table_combined_signals)
 print("\n### Kombinatsiyalangan Signallar Uchun MSE Natijalari Jadvali\n")
 print(df_mse_combined.to_markdown(index=False))
 
-# wfdb kutubxonasi endi CWRU uchun kerak emas; scipy.io.loadmat ishlatiladi
-!pip install scipy
 
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.signal import resample
-from scipy.io import loadmat # .mat fayllarini yuklash uchun
-import os
-
-# `config` va `trainer` ob'ektlari oldingi katakchalardan global miqyosda mavjud deb hisoblanadi.
-
-# 1. B007_1_123.mat faylidan namuna signalini yuklash
-print("Yuklanmoqda: B007_1_123.mat faylidan namuna signal...")
-
-try:
-    mat_file = loadmat('B007_1_123.mat')
-    print("B007_1_123.mat fayli muvaffaqiyatli yuklandi.")
-except Exception as e:
-    print(f"Xatolik yuz berdi: {e}. 'B007_1_123.mat' faylini yuklashda muammo.")
-    raise
-
-# .mat faylida signal kalitini topishga harakat qilish
-signal_key_found = None
-# Umumiy EKG kalitlarini qidirish
-possible_ecg_keys = ['val', 'ECG', 'data', 'signal'] # Eng keng tarqalgan kalitlar
-
-for key in possible_ecg_keys:
-    if key in mat_file:
-        signal_key_found = key
-        break
-
-# Agar hech qanday maxsus kalit topilmasa, mat_file.keys() ichidagi birinchi mantiqiy kalitni sinab ko'rish
-if signal_key_found is None:
-    for key in mat_file.keys():
-        if not key.startswith('__'): # Python internal kalitlarni o'tkazib yuborish
-            if isinstance(mat_file[key], np.ndarray) and mat_file[key].ndim > 0:
-                signal_key_found = key
-                break
-
-if signal_key_found is None:
-    print(f"Fayldagi mavjud kalitlar: {mat_file.keys()}")
-    raise ValueError(".mat faylida mos keladigan signal kaliti topilmadi.")
-
-signal = mat_file[signal_key_found].flatten()
-
-# ECG ma'lumotlari uchun namuna olish chastotasi (odatda MIT-BIH uchun 360 Hz).
-fs = 360 # Hz
-
-print(f"Original namuna olish chastotasi: {fs} Hz")
-print(f"Original signal uzunligi: {len(signal)} samples")
-
-# Signalning tahlil uchun segmentini tanlash
-# Modelning M (1000) ga mos keladigan segmentni olamiz.
-target_M = config.M
-start_sample = 0 # Signal boshidan olamiz
-segment_length_original = target_M # To'g'ridan-to'g'ri modelning M o'lchamini olamiz
-
-# Agar tanlangan segment signal uzunligidan oshib ketsa, uni moslashtirish
-if segment_length_original > len(signal):
-    print(f"Ogohlantirish: Tanlangan segment signal uzunligidan oshib ketdi. Moslashtirilmoqda.")
-    segment_length_original = len(signal)
-    if segment_length_original < target_M:
-        print(f"Xato: Signal model talab qilgan {target_M} namunadan kam ({segment_length_original} namuna).")
-        raise ValueError("Signal uzunligi modelning M o'lchamidan kam.")
-
-signal_segment_original = signal[start_sample : start_sample + segment_length_original]
-
-# Segmentni modelning M ga mos ravishda qayta namuna olish.
-signal_clean_resampled = resample(signal_segment_original, target_M).astype(np.float32)
-
-print(f"Tanlangan segmentning uzunligi (original): {len(signal_segment_original)} samples")
-print(f"Modelga moslashtirilgan (resampled) segmentning uzunligi: {len(signal_clean_resampled)} samples")
-
-# Signalni tipik amplituda diapazoniga normallashtirish (masalan, -1 dan 1 gacha)
-if np.max(np.abs(signal_clean_resampled)) > 0:
-    signal_clean_resampled = signal_clean_resampled / np.max(np.abs(signal_clean_resampled)) # -1 dan 1 gacha normallashtirish
-else:
-    print("Ogohlantirish: Toza segment nol amplitudaga ega. Normallashtirish amalga oshirilmadi.")
-
-# 2. Modelning epsilonidan foydalanib shovqinli versiyasini yaratish
-noise_eps = config.epsilon # O'qitilgan modelning konfiguratsiyasidagi epsilonni ishlatish
-noisy_input =  noise_eps * np.random.normal(0, 1, size=target_M).astype(np.float32)
-noisy_input = signal_clean_resampled + noisy_input
-
-# 3. O'qitilgan model yordamida signalni shovqinlardan tozalash
-print("\nModel yordamida signalni shovqinlardan tozalash...")
-predicted_denoised = trainer.predict_single(noisy_input)
-
-# 4. Natijalarni vizualizatsiya qilish
-print("Natijalarni vizualizatsiya qilish...")
-t_signal = np.linspace(0, target_M / fs, target_M) # Qayta namuna olingan segment uchun vaqt o'qi
-
-# Matplotlib uslubini va shrift o'lchamlarini sozlash (nashr uchun mos)
-plt.style.use('seaborn-v0_8-whitegrid')
-plt.rcParams.update({
-    'font.size': 18,
-    'axes.titlesize': 20,
-    'axes.labelsize': 16,
-    'legend.fontsize': 16,
-    'xtick.labelsize': 16,
-    'ytick.labelsize': 16,
-    'figure.titlesize': 22
-})
-
-plt.figure(figsize=(14, 7))
-plt.plot(t_signal, noisy_input, 'r-', alpha=0.7, label='Shovqinli Signal')
-plt.plot(t_signal, signal_clean_resampled, 'g--', linewidth=2, label='Toza Signal (Reference)')
-plt.plot(t_signal, predicted_denoised, 'b-', linewidth=2, label='Model Tiklagan Signal')
-plt.title(f'Signalni shovqinlardan tozalash (Epsilon = {noise_eps:.2f})')
-plt.xlabel('Vaqt (sekund)')
-plt.ylabel('Amplituda')
-plt.legend()
-plt.grid(True, alpha=0.6)
-plt.tight_layout()
-plt.show()
-
-mse_signal = np.mean((predicted_denoised - signal_clean_resampled)**2)
-print(f"\nSignalni shovqinlardan tozalashda MSE: {mse_signal:.6f}")
-
-print("\nSignal bilan tekshiruvlar yakunlandi.")
-
-import pandas as pd
-
-print("\n--- B007_1_123.mat fayli bo'yicha epsilon uchun MSE tahlili ---\n")
-
-# Epsilonning 5 ta qiymati
-epsilon_values_for_mat = [0.05, 0.1, 0.3, 0.5, 1.0]
-
-results_mat_file_mse = []
-
-# signal_clean_resampled oldingi katakchadan mavjud
-if 'signal_clean_resampled' not in locals():
-    print("Xatolik: 'signal_clean_resampled' o'zgaruvchisi topilmadi. Avval B007_1_123.mat faylini yuklagan katakchani ishga tushiring.")
-else:
-    print(f"Tahlil qilinmoqda: B007_1_123.mat signali (epsilon={epsilon_values_for_mat})")
-    row_data = {'Signal turi': 'B007_1_123.mat'}
-
-    for eps in epsilon_values_for_mat:
-        # Asl toza signalga joriy epsilon darajasida shovqin qo'shish
-        noise = eps * np.random.normal(0, 1, size=config.M).astype(np.float32)
-        Y_noisy_mat = signal_clean_resampled + noise
-
-        # Qayta tiklangan signalni bashorat qilish
-        predicted_signal_mat = trainer.predict_single(Y_noisy_mat)
-
-        # MSE hisoblash
-        mse_mat = np.mean((predicted_signal_mat - signal_clean_resampled)**2)
-        row_data[f'Epsilon={eps}'] = f'{mse_mat:.6f}'
-
-    results_mat_file_mse.append(row_data)
-
-    df_mat_file_mse = pd.DataFrame(results_mat_file_mse)
-
-    print("\n--- B007_1_123.mat uchun MSE natijalari jadvali ---\n")
-    print(df_mat_file_mse.to_markdown(index=False))
-
-print("\nB007_1_123.mat tahlili yakunlandi.")
 
 import numpy as np
 import matplotlib.pyplot as plt
